@@ -1,0 +1,31 @@
+name: Init
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: bridge
+  cancel-in-progress: false
+
+env:
+  MAX_TOKEN: ${{ secrets.MAX_TOKEN }}
+  TG_TOKEN: ${{ secrets.TG_TOKEN }}
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests certifi
+      - uses: actions/cache@v4
+        with:
+          key: bridge-state-init-${{ github.run_id }}
+          restore-keys: bridge-state-
+          path: config.json
+      - run: python setup_cert.py
+      - run: python bridge.py --init
+      - run: cat config.json
