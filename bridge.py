@@ -429,7 +429,7 @@ def run_init(cfg):
 def check_tokens(cfg):
     session = max_session(cfg["max_token"])
     try:
-        resp = session.get(f"{MAX_API}/bots/me", timeout=15)
+        resp = session.get(f"{MAX_API}/me", timeout=15)
     except requests.exceptions.SSLError:
         sys.exit("SSL-ошибка при обращении к MAX. Запустите: python setup_cert.py")
     if resp.status_code != 200:
