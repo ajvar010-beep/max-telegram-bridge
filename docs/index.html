@@ -11,8 +11,8 @@
   --text: var(--tg-theme-text-color, #000000);
   --hint: var(--tg-theme-hint-color, #707579);
   --accent: var(--tg-theme-button-color, #3390ec);
+  --accent-text: var(--tg-theme-button-text-color, #ffffff);
   --section: var(--tg-theme-section-bg-color, #f1f1f1);
-  --header: var(--tg-theme-header-bg-color, #efeff3);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 body {
@@ -20,29 +20,55 @@ body {
   color: var(--text);
   font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-size: 15px;
-  padding: 12px 14px 90px;
+  padding: 0 0 96px;
 }
-h1 { font-size: 20px; margin-bottom: 4px; }
-.sub { color: var(--hint); font-size: 13px; margin-bottom: 16px; }
+.hero {
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #7b2ff7));
+  color: var(--accent-text);
+  padding: 20px 18px 18px;
+  border-radius: 0 0 22px 22px;
+  margin-bottom: 14px;
+}
+.hero h1 { font-size: 21px; margin-bottom: 3px; }
+.hero .sub { font-size: 13px; opacity: .85; }
+.wrap { padding: 0 14px; }
 section { margin-bottom: 18px; }
-h2 { font-size: 16px; margin-bottom: 8px; }
+h2 { font-size: 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+h2 .count {
+  background: var(--section); color: var(--hint);
+  border-radius: 999px; font-size: 12px; font-weight: 600; padding: 2px 9px;
+}
 .card {
   background: var(--section);
-  border-radius: 12px;
-  padding: 10px 12px;
+  border-radius: 14px;
+  padding: 11px 13px;
   margin-bottom: 8px;
 }
-.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.row.gap { justify-content: space-between; }
+.avatar {
+  width: 40px; height: 40px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 16px; flex-shrink: 0; overflow: hidden;
+}
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
 .name { font-weight: 600; word-break: break-word; }
 .uid { color: var(--hint); font-size: 12px; word-break: break-all; }
 .empty { color: var(--hint); font-size: 13px; padding: 4px 2px; }
-.seg { display: flex; background: var(--bg); border-radius: 9px; padding: 2px; margin-top: 8px; }
+.search {
+  width: 100%; border: 0; border-radius: 12px; background: var(--section);
+  color: var(--text); font-size: 15px; padding: 11px 13px; font-family: inherit;
+  outline: none; margin-bottom: 10px;
+}
+.search::placeholder { color: var(--hint); }
+.seg { display: flex; background: var(--bg); border-radius: 10px; padding: 3px; margin-top: 9px; }
 .seg button {
   flex: 1; border: 0; background: transparent; color: var(--hint);
-  font-size: 13px; font-weight: 600; padding: 7px 4px; border-radius: 7px;
+  font-size: 13px; font-weight: 600; padding: 7px 4px; border-radius: 8px;
   cursor: pointer; font-family: inherit;
 }
-.seg button.on { background: var(--accent); color: #fff; }
+.seg button.on { background: var(--accent); color: var(--accent-text); }
 .btn {
   display: block; width: 100%; border: 0; border-radius: 12px;
   background: var(--section); color: var(--text);
@@ -51,6 +77,7 @@ h2 { font-size: 16px; margin-bottom: 8px; }
 }
 .btn:active { opacity: .7; }
 .btn.danger { color: #e53935; }
+.btn.small { width: auto; margin: 0; padding: 8px 14px; font-size: 13px; }
 .btns2 { display: flex; gap: 8px; }
 .btns2 .btn { flex: 1; }
 .addrow { display: flex; gap: 8px; }
@@ -66,20 +93,35 @@ h2 { font-size: 16px; margin-bottom: 8px; }
   border-top: 1px solid var(--section);
 }
 .save {
-  display: block; width: 100%; border: 0; border-radius: 12px;
-  background: var(--accent); color: var(--tg-theme-button-text-color, #fff);
+  display: block; width: 100%; border: 0; border-radius: 13px;
+  background: var(--accent); color: var(--accent-text);
   font-size: 16px; font-weight: 700; padding: 15px; cursor: pointer; font-family: inherit;
 }
 .save:active { opacity: .8; }
 .status { text-align: center; color: var(--hint); font-size: 12px; margin-top: 6px; min-height: 16px; }
+.filterbar { display: flex; gap: 6px; margin-bottom: 10px; }
+.chip {
+  border: 0; border-radius: 999px; background: var(--section); color: var(--hint);
+  font-size: 13px; font-weight: 600; padding: 7px 13px; cursor: pointer; font-family: inherit;
+}
+.chip.on { background: var(--accent); color: var(--accent-text); }
 </style>
 </head>
 <body>
-<h1>Панель управления</h1>
-<div class="sub" id="sub">Загрузка…</div>
+<div class="hero">
+  <h1>🎛 Панель управления</h1>
+  <div class="sub" id="sub">Загрузка…</div>
+</div>
+<div class="wrap">
 
 <section>
-  <h2>Отправители MAX</h2>
+  <h2>Участники MAX <span class="count" id="pcount">0</span></h2>
+  <input class="search" id="search" type="text" placeholder="Поиск по имени или ID…">
+  <div class="filterbar">
+    <button class="chip on" data-f="all">Все</button>
+    <button class="chip" data-f="nopin">✉️ без закрепа</button>
+    <button class="chip" data-f="block">🚫 заблокированы</button>
+  </div>
   <div id="senders"></div>
 </section>
 
@@ -101,6 +143,7 @@ h2 { font-size: 16px; margin-bottom: 8px; }
   </div>
 </section>
 
+</div>
 <div class="fixed">
   <button class="save" id="save">💾 Сохранить изменения</button>
   <div class="status" id="saveStatus"></div>
@@ -116,15 +159,39 @@ var MODES = [
   { key: "block", label: "🚫" }
 ];
 
-var data = { recent: [], rules: {}, max_chat_ids: [] };
-try {
-  var raw = new URLSearchParams(location.search).get("d");
-  if (raw) data = JSON.parse(decodeURIComponent(raw));
-} catch (e) {}
+var data = { participants: [], rules: {}, max_chat_ids: [] };
+var query = "";
+var filter = "all";
 
-document.getElementById("sub").textContent = data.max_chat_ids && data.max_chat_ids.length
-  ? "Подключено чатов MAX: " + data.max_chat_ids.length
-  : "Чаты MAX не подключены";
+function inflate(b64) {
+  var std = b64.replace(/-/g, "+").replace(/_/g, "/");
+  while (std.length % 4) std += "=";
+  var bin = Uint8Array.from(atob(std), function (c) { return c.charCodeAt(0); });
+  var ds = new DecompressionStream("deflate");
+  return new Response(new Blob([bin]).stream().pipeThrough(ds)).text().then(JSON.parse);
+}
+
+function boot() {
+  var raw = new URLSearchParams(location.search).get("d");
+  if (!raw) { start(); return; }
+  var direct = null;
+  try { direct = JSON.parse(decodeURIComponent(raw)); } catch (e) {}
+  if (direct && typeof direct === "object") { data = direct; start(); return; }
+  inflate(raw).then(function (parsed) { data = parsed; start(); })
+    .catch(function () { start(); });
+}
+
+function start() {
+  if (!data.participants) data.participants = [];
+  if (!data.rules) data.rules = {};
+  if (!data.max_chat_ids) data.max_chat_ids = [];
+  document.getElementById("sub").textContent = data.max_chat_ids.length
+    ? "Чатов MAX: " + data.max_chat_ids.length + " · участников в списке: " + data.participants.length
+    : "Чаты MAX не подключены";
+  document.getElementById("pcount").textContent = data.participants.length;
+  renderSenders();
+  renderChats();
+}
 
 function el(tag, cls, text) {
   var n = document.createElement(tag);
@@ -133,33 +200,58 @@ function el(tag, cls, text) {
   return n;
 }
 
+function avatarNode(p) {
+  var a = el("div", "avatar");
+  var name = p.name || "?";
+  if (p.avatar) {
+    var img = document.createElement("img");
+    img.src = p.avatar;
+    img.referrerPolicy = "no-referrer";
+    img.onerror = function () { img.remove(); a.textContent = name.charAt(0).toUpperCase(); };
+    a.appendChild(img);
+    a.appendChild(document.createTextNode(""));
+    if (!a.textContent) a.textContent = name.charAt(0).toUpperCase();
+  } else {
+    a.textContent = name.charAt(0).toUpperCase();
+  }
+  return a;
+}
+
 function renderSenders() {
   var box = document.getElementById("senders");
   box.innerHTML = "";
-  var recent = data.recent || [];
-  if (!recent.length) {
-    box.appendChild(el("div", "empty", "Пока нет отправителей. Напишите что-нибудь в группу MAX — они появятся здесь."));
+  var list = data.participants.filter(function (p) {
+    var id = String(p.id);
+    var rule = data.rules[id] || "";
+    if (filter === "nopin" && rule !== "nopin") return false;
+    if (filter === "block" && rule !== "block") return false;
+    if (query && (p.name || "").toLowerCase().indexOf(query) === -1 && id.indexOf(query) === -1) return false;
+    return true;
+  });
+  if (!list.length) {
+    box.appendChild(el("div", "empty", data.participants.length
+      ? "Никого не найдено."
+      : "Список пуст. Ростер участников обновляется при запуске моста и по команде /app."));
     return;
   }
-  var seen = {};
-  recent.forEach(function (s) {
-    var id = String(s.id);
-    if (seen[id]) return;
-    seen[id] = true;
+  list.forEach(function (p) {
+    var id = String(p.id);
     var card = el("div", "card");
     var row = el("div", "row");
+    row.appendChild(avatarNode(p));
     var left = el("div");
-    left.appendChild(el("div", "name", s.name || "Без имени"));
+    left.appendChild(el("div", "name", p.name || "Без имени"));
     left.appendChild(el("div", "uid", "ID: " + id));
     row.appendChild(left);
     card.appendChild(row);
     var seg = el("div", "seg");
-    var cur = (data.rules || {})[id] || "";
+    var cur = data.rules[id] || "";
     MODES.forEach(function (m) {
       var b = el("button", cur === m.key ? "on" : "", m.label);
       b.onclick = function () {
         if (m.key) data.rules[id] = m.key;
         else delete data.rules[id];
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
         renderSenders();
       };
       seg.appendChild(b);
@@ -168,6 +260,20 @@ function renderSenders() {
     box.appendChild(card);
   });
 }
+
+document.getElementById("search").oninput = function () {
+  query = this.value.trim().toLowerCase();
+  renderSenders();
+};
+
+Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (chip) {
+  chip.onclick = function () {
+    Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (c) { c.classList.remove("on"); });
+    chip.classList.add("on");
+    filter = chip.dataset.f;
+    renderSenders();
+  };
+});
 
 function renderChats() {
   var box = document.getElementById("chats");
@@ -179,13 +285,9 @@ function renderChats() {
   }
   ids.forEach(function (cid, i) {
     var card = el("div", "card");
-    var row = el("div", "row");
+    var row = el("div", "row gap");
     row.appendChild(el("span", "uid", String(cid)));
-    var del = el("button", "btn danger", "Убрать");
-    del.style.width = "auto";
-    del.style.margin = "0";
-    del.style.padding = "8px 14px";
-    del.style.fontSize = "13px";
+    var del = el("button", "btn danger small", "Убрать");
     del.onclick = function () {
       data.max_chat_ids.splice(i, 1);
       renderChats();
@@ -200,13 +302,11 @@ document.getElementById("addChat").onclick = function () {
   var inp = document.getElementById("chatId");
   var v = inp.value.trim();
   if (!/^-?\d+$/.test(v)) {
-    if (tg) tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error");
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
     return;
   }
   v = String(parseInt(v, 10));
-  if (data.max_chat_ids.indexOf(v) === -1 && data.max_chat_ids.indexOf(Number(v)) === -1) {
-    data.max_chat_ids.push(v);
-  }
+  if (data.max_chat_ids.map(String).indexOf(v) === -1) data.max_chat_ids.push(v);
   inp.value = "";
   renderChats();
 };
@@ -236,8 +336,7 @@ document.getElementById("save").onclick = function () {
   setTimeout(function () { document.getElementById("saveStatus").textContent = ""; }, 3000);
 };
 
-renderSenders();
-renderChats();
+boot();
 </script>
 </body>
 </html>
