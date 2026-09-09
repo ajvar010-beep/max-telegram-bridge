@@ -497,7 +497,7 @@ def handle_command(cfg, state, text):
 
 
 def poll_tg_admin(cfg, state):
-    params = {"timeout": 0, "limit": 100, "allowed_updates": json.dumps(["message"])}
+    params = {"limit": 100, "allowed_updates": json.dumps(["message"])}
     offset = state.get("tg_offset")
     if offset:
         params["offset"] = offset
