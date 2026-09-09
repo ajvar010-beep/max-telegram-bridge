@@ -1,11 +1,12 @@
 import argparse
+import base64
 import html
 import json
 import logging
 import os
 import sys
 import time
-from urllib.parse import quote
+import zlib
 
 import requests
 
@@ -35,6 +36,18 @@ MAX_ENTITY_TO_HTML = {
 FILE_ATTACHMENT_TYPES = {"image", "video", "audio", "voice", "file", "sticker"}
 
 MINI_APP_URL = os.environ.get("MINI_APP_URL") or "https://ajvar010-beep.github.io/max-telegram-bridge/"
+SECRETARY_APP_URL = os.environ.get("SECRETARY_APP_URL") or "https://ajvar010-beep.github.io/max-telegram-bridge/secretary.html"
+
+TG_ATT_TO_MAX = {
+    "photo": ("image", ".jpg", "image/jpeg"),
+    "video": ("video", ".mp4", "video/mp4"),
+    "animation": ("video", ".mp4", "video/mp4"),
+    "audio": ("audio", ".mp3", "audio/mpeg"),
+    "voice": ("audio", ".ogg", "audio/ogg"),
+    "document": ("file", None, "application/octet-stream"),
+    "sticker": ("image", ".webp", "image/webp"),
+}
+MEDIA_CAPTION_LIMIT = 400
 
 log = logging.getLogger("bridge")
 _last_tg_send = 0.0
@@ -61,7 +74,7 @@ def load_config():
 
 
 def load_state():
-    state = {"marker": None, "rules": {}, "tg_offset": None, "recent": []}
+    state = {"marker": None, "rules": {}, "tg_offset": None, "recent": [], "feed": [], "participants": {}, "tg_welcomed": []}
     if os.path.exists(STATE_PATH):
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
@@ -88,10 +101,30 @@ def max_session(token):
     return s
 
 
-def max_send(session, chat_id, text):
-    resp = session.post(f"{MAX_API}/messages", params={"chat_id": chat_id}, json={"text": text}, timeout=30)
+def max_send(session, chat_id, text=None, attachments=None, link=None):
+    payload = {}
+    if text:
+        payload["text"] = text[:4000]
+    if attachments:
+        payload["attachments"] = attachments
+    if link:
+        payload["link"] = link
+    resp = session.post(f"{MAX_API}/messages", params={"chat_id": chat_id}, json=payload, timeout=60)
     resp.raise_for_status()
-    return resp.json()
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def encode_snapshot(snapshot):
+    raw = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode("ascii")
+
+
+def tg_user_name(user):
+    name = f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip()
+    return name or user.get("username") or "Пользователь"
 
 
 def tg_send(tg_token, method, timeout=60, **data):
@@ -417,6 +450,19 @@ def handle_message(session, cfg, state, msg):
         recent.insert(0, {"id": int(user_id), "name": sender_name(msg)})
         state["recent"] = recent[:20]
 
+    mid = msg.get("mid") or msg.get("message_id") or msg.get("id")
+    atts = [a.get("type") for a in (body.get("attachments") or []) if isinstance(a, dict) and a.get("type")]
+    if mid is not None and (text or atts):
+        feed = state.setdefault("feed", [])
+        feed.insert(0, {
+            "id": int(mid),
+            "chat_id": int(chat_id),
+            "name": sender_name(msg) if sender else "Канал",
+            "text": text[:300],
+            "atts": atts[:5],
+        })
+        state["feed"] = feed[:15]
+
     log.info("Сообщение от %s → Telegram", sender_name(msg))
     sent_ids = forward_message(session, cfg, msg)
     if user_id is not None and state.get("rules", {}).get(str(user_id)) == "nopin":
@@ -554,19 +600,28 @@ def send_app_keyboard(cfg, state, chat_id, hide=False):
         except Exception as e:
             log.warning("Не удалось скрыть кнопку панели: %s", e)
         return
+    participants = []
+    for uid, info in state.get("participants", {}).items():
+        participants.append({"id": int(uid), "name": info.get("name", "?"), "avatar": info.get("avatar") or ""})
+    for r in state.get("recent", []):
+        if not any(p["id"] == r.get("id") for p in participants):
+            participants.append({"id": r.get("id"), "name": r.get("name", "?"), "avatar": ""})
     snapshot = {
-        "recent": state.get("recent", []),
+        "participants": participants,
         "rules": state.get("rules", {}),
         "max_chat_ids": cfg["max_chat_ids"],
     }
-    url = MINI_APP_URL + "?d=" + quote(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))) + "#" + str(int(time.time()))
+    url = MINI_APP_URL + "?d=" + encode_snapshot(snapshot) + "#" + str(int(time.time()))
+    if len(url) > 3900:
+        snapshot["participants"] = participants[:120]
+        url = MINI_APP_URL + "?d=" + encode_snapshot(snapshot) + "#" + str(int(time.time()))
     markup = {
         "keyboard": [[{"text": "🎛 Панель управления", "web_app": {"url": url}}]],
         "resize_keyboard": True,
     }
     try:
         tg_send(cfg["tg_token"], "sendMessage", chat_id=chat_id,
-                text="Панель управления мостом открыта — нажмите кнопку «🎛 Панель управления» под полем ввода.",
+                text=f"Панель управления мостом открыта — нажмите кнопку «🎛 Панель управления» под полем ввода. Участников в списке: {len(snapshot['participants'])}.",
                 reply_markup=json.dumps(markup))
     except Exception as e:
         log.warning("Не удалось отправить клавиатуру панели: %s", e)
@@ -628,7 +683,194 @@ def apply_web_app_data(cfg, state, raw):
     return "Настройки из панели сохранены (" + ", ".join(changed) + ")."
 
 
-def poll_tg_admin(cfg, state):
+def fetch_participants(session, cfg, state):
+    participants = state.setdefault("participants", {})
+    for chat_id in cfg["max_chat_ids"]:
+        marker = None
+        for _ in range(20):
+            params = {"count": 100}
+            if marker is not None:
+                params["marker"] = marker
+            try:
+                resp = session.get(f"{MAX_API}/chats/{chat_id}/members", params=params, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                log.warning("Не удалось получить участников чата %s: %s", chat_id, e)
+                break
+            members = data.get("members") or []
+            for m in members:
+                if not isinstance(m, dict):
+                    continue
+                if m.get("is_bot"):
+                    continue
+                user = m.get("user") if isinstance(m.get("user"), dict) else m
+                uid = user.get("user_id") or user.get("id")
+                if uid is None:
+                    continue
+                name = f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip()
+                name = name or user.get("username") or user.get("name") or "Участник"
+                info = participants.setdefault(str(uid), {})
+                info["name"] = name
+                avatar = user.get("avatar_url") or m.get("avatar_url")
+                if avatar and not info.get("avatar"):
+                    info["avatar"] = avatar
+                info["chat_id"] = int(chat_id)
+            marker = data.get("marker")
+            if not marker or not members:
+                break
+    if len(participants) > 400:
+        state["participants"] = dict(list(participants.items())[:400])
+    return state["participants"]
+
+
+def send_secretary_keyboard(cfg, state, tg_chat_id, user_name):
+    snapshot = {
+        "feed": state.get("feed", []),
+        "me": user_name,
+    }
+    url = SECRETARY_APP_URL + "?d=" + encode_snapshot(snapshot) + "#" + str(int(time.time()))
+    markup = {
+        "keyboard": [[{"text": "📨 Секретарь", "web_app": {"url": url}}]],
+        "resize_keyboard": True,
+    }
+    try:
+        tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id,
+                text=(f"👋 Привет, {user_name}! Я — секретарь группы MAX.\n\n"
+                      "Просто напишите мне текст или отправьте фото/видео/файл — "
+                      "я передам это в группу MAX от вашего имени.\n"
+                      "Кнопка «📨 Секретарь» открывает мини-приложение: там лента последних "
+                      "сообщений группы и быстрые реакции.\n\n"
+                      "/secretary — снова показать кнопку"),
+                reply_markup=json.dumps(markup))
+    except Exception as e:
+        log.warning("Не удалось отправить клавиатуру секретаря: %s", e)
+
+
+def relay_tg_to_max(session, cfg, state, msg):
+    user = msg.get("from") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    name = tg_user_name(user)
+    text = (msg.get("text") or msg.get("caption") or "").strip()
+    if not cfg["max_chat_ids"]:
+        tg_reply(cfg["tg_token"], chat_id, "Не настроены чаты MAX для пересылки.")
+        return
+    att = None
+    for kind in ("photo", "video", "audio", "voice", "document", "sticker", "animation"):
+        if msg.get(kind):
+            att = kind
+            break
+    label = f"📱 {name} (Telegram)"
+    if not att:
+        if not text:
+            tg_reply(cfg["tg_token"], chat_id, "Пришлите текст или файл — я передам его в MAX.")
+            return
+        head = f"{label}:\n{text}"
+    else:
+        items = msg[att]
+        item = items[-1] if isinstance(items, list) else items
+        file_id = item.get("file_id")
+        try:
+            info = tg_send(cfg["tg_token"], "getFile", file_id=file_id)
+            resp = requests.get(f"https://api.telegram.org/file/bot{cfg['tg_token']}/{info['file_path']}", timeout=120)
+            resp.raise_for_status()
+            blob = resp.content
+        except Exception as e:
+            tg_reply(cfg["tg_token"], chat_id, f"Не удалось скачать файл из Telegram: {e}")
+            return
+        max_type, fallback_ext, mime = TG_ATT_TO_MAX.get(att, ("file", ".bin", "application/octet-stream"))
+        fname = item.get("file_name") or os.path.basename(info.get("file_path") or "") or "file" + (fallback_ext or "")
+        if len(blob) > 20 * 1024 * 1024:
+            tg_reply(cfg["tg_token"], chat_id, "Файл больше 20 МБ — секретарь передаёт только файлы до 20 МБ.")
+            return
+        try:
+            up = session.post(f"{MAX_API}/uploads", files={"data": (fname, blob, mime)}, timeout=300)
+            up.raise_for_status()
+            updata = up.json()
+        except Exception as e:
+            log.error("Ошибка загрузки в MAX: %s | %s", e, getattr(e.response, 'text', '')[:300] if hasattr(e, 'response') else '')
+            tg_reply(cfg["tg_token"], chat_id, f"Не удалось загрузить файл в MAX: {e}")
+            return
+        token = None
+        for key in ("token", "upload_token", "media_token", "file_token"):
+            if updata.get(key):
+                token = updata[key]
+                break
+        if not token:
+            log.error("MAX /uploads без токена: %s", json.dumps(updata, ensure_ascii=False)[:500])
+            tg_reply(cfg["tg_token"], chat_id, "MAX не выдал токен загрузки — попробуйте ещё раз.")
+            return
+        atts = [{"type": max_type, "payload": {"token": token}}]
+        if text:
+            head = f"{label}:\n{text[:MEDIA_CAPTION_LIMIT]}"
+        else:
+            head = label
+    errors = []
+    sent = 0
+    for mcid in cfg["max_chat_ids"]:
+        try:
+            if att:
+                max_send(session, mcid, head, attachments=atts)
+            else:
+                max_send(session, mcid, head)
+            sent += 1
+        except Exception as e:
+            log.error("Секретарь: не удалось отправить в MAX-чат %s: %s", mcid, e)
+            errors.append(f"{mcid}: {e}")
+    if sent:
+        tg_reply(cfg["tg_token"], chat_id, f"✅ Передано в MAX ({name}): {truncate(head, 200)}")
+    else:
+        tg_reply(cfg["tg_token"], chat_id, "Не удалось передать в MAX:\n" + "\n".join(errors[:3]))
+
+
+def apply_secretary_data(session, cfg, state, raw, tg_chat_id, user_name):
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return "Не удалось разобрать данные секретаря."
+    if not isinstance(data, dict):
+        return "Не удалось разобрать данные секретаря."
+    if not cfg["max_chat_ids"]:
+        return "Не настроены чаты MAX для пересылки."
+    label = f"📱 {user_name} (Telegram)"
+    react = data.get("react")
+    if isinstance(react, dict):
+        emoji = str(react.get("emoji") or "").strip()
+        target = None
+        for item in state.get("feed", []):
+            if str(item.get("id")) == str(react.get("id")):
+                target = item
+                break
+        if not emoji or not target:
+            return "Реакция не найдена — обновите ленту и попробуйте снова."
+        body_text = f"{label} отреагировал(а): {emoji}"
+        quote_text = target.get("text")
+        if quote_text:
+            body_text += f"\n↩️ «{truncate(quote_text, 300)}» ({target.get('name', '?')})"
+        link = {"message_id": int(target["id"]), "chat_id": int(target["chat_id"])}
+        for mcid in cfg["max_chat_ids"]:
+            try:
+                max_send(session, mcid, body_text, link=link)
+            except Exception as e:
+                log.warning("Реакция в MAX-чат %s не ушла: %s", mcid, e)
+        return f"{emoji} Реакция отправлена в MAX."
+    text = str(data.get("send") or "").strip()
+    if text:
+        for mcid in cfg["max_chat_ids"]:
+            try:
+                max_send(session, mcid, f"{label}:\n{text}")
+            except Exception as e:
+                log.error("Секретарь: не удалось отправить в MAX-чат %s: %s", mcid, e)
+                return f"Не удалось отправить в MAX: {e}"
+        return f"✅ Отправлено в MAX от имени «{user_name}»."
+    if data.get("refresh"):
+        fetch_participants(session, cfg, state)
+        send_secretary_keyboard(cfg, state, tg_chat_id, user_name)
+        return "Лента обновлена — откройте «📨 Секретарь» снова."
+    return "Секретарь не понял команду."
+
+
+def poll_tg_admin(session, cfg, state):
     params = {"limit": 100, "allowed_updates": json.dumps(["message"])}
     offset = state.get("tg_offset")
     if offset:
@@ -639,13 +881,45 @@ def poll_tg_admin(cfg, state):
         log.warning("Ошибка getUpdates: %s", e)
         return
     admins = tg_admin_ids(cfg)
+    state_changed = False
     for upd in updates:
         state["tg_offset"] = upd["update_id"] + 1
         msg = upd.get("message") or {}
         chat = msg.get("chat") or {}
         user = msg.get("from") or {}
         text = (msg.get("text") or "").strip()
-        if user.get("id") is None or int(user["id"]) not in admins:
+        is_admin = user.get("id") is not None and int(user["id"]) in admins
+        if not is_admin:
+            if chat.get("type") != "private" or user.get("is_bot"):
+                continue
+            user_name = tg_user_name(user)
+            welcomed = state.setdefault("tg_welcomed", [])
+            if user.get("id") not in welcomed:
+                welcomed.append(user.get("id"))
+                state["tg_welcomed"] = welcomed[-300:]
+                state_changed = True
+                send_secretary_keyboard(cfg, state, chat.get("id"), user_name)
+                continue
+            wad = msg.get("web_app_data")
+            if isinstance(wad, dict) and wad.get("data"):
+                log.info("Данные секретаря от %s", user_name)
+                answer = apply_secretary_data(session, cfg, state, wad["data"], chat.get("id"), user_name)
+                tg_reply(cfg["tg_token"], chat.get("id"), answer)
+                continue
+            if text.lower() in ("/secretary", "/app", "/start"):
+                send_secretary_keyboard(cfg, state, chat.get("id"), user_name)
+                continue
+            if text.startswith("/"):
+                tg_reply(cfg["tg_token"], chat.get("id"),
+                         "Я — секретарь группы MAX: напишите мне обычный текст, фото, видео или файл — "
+                         "передам в группу от вашего имени.\n"
+                         "/secretary — кнопка мини-приложения с лентой и реакциями.")
+                continue
+            try:
+                relay_tg_to_max(session, cfg, state, msg)
+            except Exception as e:
+                log.error("Ошибка секретаря: %s", e)
+                tg_reply(cfg["tg_token"], chat.get("id"), f"Не удалось передать сообщение: {e}")
             continue
         wad = msg.get("web_app_data")
         if isinstance(wad, dict) and wad.get("data"):
@@ -654,16 +928,30 @@ def poll_tg_admin(cfg, state):
             tg_reply(cfg["tg_token"], chat.get("id"), answer)
             continue
         if not text.startswith("/"):
+            if chat.get("type") == "private":
+                try:
+                    relay_tg_to_max(session, cfg, state, msg)
+                except Exception as e:
+                    log.error("Ошибка секретаря (админ): %s", e)
             continue
         log.info("TG-команда %s", text)
         parts = text.split()
-        if parts[0].lower() == "/app":
+        cmd = parts[0].lower()
+        if cmd == "/app":
             if chat.get("type") == "private":
+                fetch_participants(session, cfg, state)
                 send_app_keyboard(cfg, state, chat.get("id"), hide=len(parts) > 1 and parts[1].lower() == "hide")
             else:
                 tg_reply(cfg["tg_token"], chat.get("id"),
                          "Кнопку мини-приложений Telegram показывает только в личных чатах — "
                          "напишите /app боту @zakreplatorinatorbot в личные сообщения.")
+            continue
+        if cmd == "/secretary":
+            if chat.get("type") == "private":
+                send_secretary_keyboard(cfg, state, chat.get("id"), tg_user_name(user))
+            else:
+                tg_reply(cfg["tg_token"], chat.get("id"),
+                         "Напишите /secretary боту @zakreplatorinatorbot в личные сообщения.")
             continue
         answer = handle_command(cfg, state, text)
         tg_reply(cfg["tg_token"], chat.get("id"), answer)
@@ -687,10 +975,16 @@ def poll_loop(cfg, run_for=None):
         state["marker"] = marker
         save_state(state)
     log.info("Polling запущен, маркер: %s", marker)
+    try:
+        parts = fetch_participants(session, cfg, state)
+        save_state(state)
+        log.info("Участников MAX в ростере: %s", len(parts))
+    except Exception as e:
+        log.warning("Не удалось обновить ростер участников: %s", e)
     delay = 0
     while deadline is None or time.monotonic() < deadline:
         try:
-            poll_tg_admin(cfg, state)
+            poll_tg_admin(session, cfg, state)
             params = {"timeout": 30, "limit": 100, "types": "message_created"}
             if marker is not None:
                 params["marker"] = marker
