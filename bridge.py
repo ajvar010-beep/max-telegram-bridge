@@ -46,7 +46,11 @@ def load_config():
     for key, env in env_keys.items():
         val = os.environ.get(env)
         if val:
-            cfg[key] = int(val) if key.endswith("chat_id") else val
+            cfg[key] = val if key == "max_chat_id" else (int(val) if key.endswith("chat_id") else val)
+    ids = [int(x) for x in str(cfg.get("max_chat_id") or "").replace(";", ",").split(",") if x.strip()]
+    cfg["max_chat_ids"] = ids
+    if ids:
+        cfg["max_chat_id"] = ids[0]
     missing = [k for k in ("max_token", "tg_token") if not cfg.get(k)]
     if missing:
         sys.exit(f"Не заданы {', '.join(missing)}: заполните config.json или переменные окружения MAX_TOKEN/TG_TOKEN")
@@ -379,7 +383,7 @@ def pin_message(cfg, message_id):
 
 def handle_message(session, cfg, state, msg):
     chat_id = (msg.get("recipient") or {}).get("chat_id")
-    if chat_id is None or int(chat_id) != int(cfg["max_chat_id"]):
+    if chat_id is None or int(chat_id) not in cfg["max_chat_ids"]:
         return
     sender = msg.get("sender") or {}
     if not sender:
@@ -392,7 +396,7 @@ def handle_message(session, cfg, state, msg):
     body = msg.get("body") or {}
     text = (body.get("text") or "").strip()
     if user_id is not None and int(user_id) in max_admin_ids(cfg) and text.startswith("/"):
-        answer = handle_command(cfg, state, text)
+        answer = handle_command(cfg, state, text, chat_id=int(chat_id))
         try:
             max_send(session, chat_id, answer)
         except Exception as e:
@@ -426,16 +430,47 @@ HELP_TEXT = (
     "/pin <id> — пересылать с закрепом\n"
     "/unpin — снять последний закреп\n"
     "/unpinall — снять все закрепы\n"
+    "/chats — обслуживаемые чаты MAX\n"
+    "/chat add <id> — добавить чат MAX\n"
+    "/chat remove <id> — убрать чат MAX\n"
     "/help — эта справка"
 )
 
 
-def handle_command(cfg, state, text):
+def handle_command(cfg, state, text, chat_id=None):
     parts = text.split()
     cmd = parts[0].lower()
     rules = state.setdefault("rules", {})
     recent = state.get("recent", [])
     id_to_name = {str(r["id"]): r.get("name", "?") for r in recent}
+
+    if cmd == "/chat":
+        if chat_id is None:
+            return "Управление чатами MAX доступно только из группы MAX."
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        ids = cfg["max_chat_ids"]
+        if sub == "add":
+            ids = list(dict.fromkeys(ids + [chat_id]))
+        elif sub == "remove":
+            if len(parts) > 2 and parts[2].lstrip("-").isdigit():
+                target = int(parts[2])
+            else:
+                target = chat_id
+            if target == cfg.get("max_chat_id") and len(ids) == 1:
+                return "Нельзя убрать единственный чат."
+            ids = [i for i in ids if i != target]
+            if cfg.get("max_chat_id") not in ids and ids:
+                cfg["max_chat_id"] = ids[0]
+        else:
+            return "Формат: /chat add или /chat remove <id>. Текущие: /chats"
+        cfg["max_chat_ids"] = ids
+        state["max_chat_ids"] = ids
+        save_state(state)
+        return f"Обслуживаемые чаты MAX: {', '.join(str(i) for i in ids) or 'нет'}"
+
+    if cmd == "/chats":
+        ids = cfg["max_chat_ids"]
+        return f"Обслуживаемые чаты MAX: {', '.join(str(i) for i in ids) or 'нет'}"
 
     if cmd == "/list":
         if not recent:
@@ -524,6 +559,10 @@ def poll_loop(cfg, run_for=None):
     session = max_session(cfg["max_token"])
     deadline = time.monotonic() + run_for if run_for else None
     state = load_state()
+    saved_chats = [int(c) for c in state.get("max_chat_ids") or []]
+    if saved_chats:
+        cfg["max_chat_ids"] = list(dict.fromkeys(saved_chats + cfg["max_chat_ids"]))
+        cfg["max_chat_id"] = cfg["max_chat_ids"][0]
     marker = state.get("marker")
     if marker is None:
         log.info("Первый запуск: инициализирую маркер (история не пересылается)")
