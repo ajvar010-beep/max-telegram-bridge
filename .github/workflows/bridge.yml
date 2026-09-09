@@ -16,6 +16,7 @@ env:
   TG_TOKEN: ${{ secrets.TG_TOKEN }}
   MAX_CHAT_ID: ${{ secrets.MAX_CHAT_ID }}
   TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+  GH_PAT: ${{ secrets.GH_PAT }}
 
 jobs:
   bridge:

@@ -37,6 +37,10 @@ FILE_ATTACHMENT_TYPES = {"image", "video", "audio", "voice", "file", "sticker"}
 
 MINI_APP_URL = os.environ.get("MINI_APP_URL") or "https://ajvar010-beep.github.io/max-telegram-bridge/"
 SECRETARY_APP_URL = os.environ.get("SECRETARY_APP_URL") or "https://ajvar010-beep.github.io/max-telegram-bridge/secretary.html"
+FEED_GIST_ID = os.environ.get("FEED_GIST_ID") or "e323236a48656d6aa727aed936370569"
+FEED_GIST_URL = os.environ.get("FEED_GIST_URL") or (
+    "https://gist.githubusercontent.com/ajvar010-beep/" + FEED_GIST_ID + "/raw/feed.json"
+)
 
 TG_ATT_TO_MAX = {
     "photo": ("image", ".jpg", "image/jpeg"),
@@ -89,6 +93,23 @@ def save_state(state):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f)
     os.replace(tmp, STATE_PATH)
+
+
+def sync_feed_gist(state):
+    pat = os.environ.get("GH_PAT")
+    if not pat:
+        return False
+    payload = {"files": {"feed.json": {"content": json.dumps(
+        {"feed": state.get("feed", []), "updated": int(time.time())}, ensure_ascii=False)}}}
+    try:
+        r = requests.patch(f"https://api.github.com/gists/{FEED_GIST_ID}", json=payload, timeout=30,
+                           headers={"Authorization": f"Bearer {pat}", "User-Agent": "bridge",
+                                    "Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        log.warning("Не удалось опубликовать ленту в gist: %s", e)
+        return False
 
 
 def max_session(token):
@@ -453,6 +474,9 @@ def handle_message(session, cfg, state, msg):
     mid = msg.get("mid") or msg.get("message_id") or msg.get("id")
     atts = [a.get("type") for a in (body.get("attachments") or []) if isinstance(a, dict) and a.get("type")]
     if mid is not None and (text or atts):
+        ts = msg.get("timestamp") or body.get("timestamp") or int(time.time())
+        if ts and ts > 1e11:
+            ts = int(ts / 1000)
         feed = state.setdefault("feed", [])
         feed.insert(0, {
             "id": int(mid),
@@ -460,8 +484,10 @@ def handle_message(session, cfg, state, msg):
             "name": sender_name(msg) if sender else "Канал",
             "text": text[:300],
             "atts": atts[:5],
+            "ts": int(ts),
         })
         state["feed"] = feed[:15]
+        sync_feed_gist(state)
 
     log.info("Сообщение от %s → Telegram", sender_name(msg))
     sent_ids = forward_message(session, cfg, msg)
@@ -728,6 +754,7 @@ def send_secretary_keyboard(cfg, state, tg_chat_id, user_name):
     snapshot = {
         "feed": state.get("feed", []),
         "me": user_name,
+        "live": FEED_GIST_URL,
     }
     url = SECRETARY_APP_URL + "?d=" + encode_snapshot(snapshot) + "#" + str(int(time.time()))
     markup = {
@@ -975,6 +1002,7 @@ def poll_loop(cfg, run_for=None):
         state["marker"] = marker
         save_state(state)
     log.info("Polling запущен, маркер: %s", marker)
+    sync_feed_gist(state)
     try:
         parts = fetch_participants(session, cfg, state)
         save_state(state)
