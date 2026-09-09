@@ -383,15 +383,9 @@ def pin_message(cfg, message_id):
 
 def handle_message(session, cfg, state, msg):
     chat_id = (msg.get("recipient") or {}).get("chat_id")
-    if chat_id is None or int(chat_id) not in cfg["max_chat_ids"]:
+    if chat_id is None:
         return
     sender = msg.get("sender") or {}
-    if not sender:
-        log.info("Сообщение от канала → Telegram")
-        sent_ids = forward_message(session, cfg, msg)
-        pin_message(cfg, sent_ids[0])
-        return
-
     user_id = sender.get("user_id")
     body = msg.get("body") or {}
     text = (body.get("text") or "").strip()
@@ -401,6 +395,14 @@ def handle_message(session, cfg, state, msg):
             max_send(session, chat_id, answer)
         except Exception as e:
             log.error("Не удалось ответить в MAX: %s", e)
+        return
+
+    if int(chat_id) not in cfg["max_chat_ids"]:
+        return
+    if not sender:
+        log.info("Сообщение от канала → Telegram")
+        sent_ids = forward_message(session, cfg, msg)
+        pin_message(cfg, sent_ids[0])
         return
 
     if user_id is not None:
