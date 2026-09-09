@@ -31,6 +31,8 @@ MAX_ENTITY_TO_HTML = {
     "underline": "u",
 }
 
+FILE_ATTACHMENT_TYPES = {"image", "video", "audio", "voice", "file", "sticker"}
+
 log = logging.getLogger("bridge")
 _last_tg_send = 0.0
 
@@ -52,13 +54,14 @@ def load_config():
 
 
 def load_state():
+    state = {"marker": None, "rules": {}, "tg_offset": None, "recent": []}
     if os.path.exists(STATE_PATH):
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                state.update(json.load(f))
         except (json.JSONDecodeError, OSError):
             pass
-    return {"marker": None}
+    return state
 
 
 def save_state(state):
@@ -76,6 +79,12 @@ def max_session(token):
     else:
         log.warning("ca_bundle.pem не найден — запустите setup_cert.py")
     return s
+
+
+def max_send(session, chat_id, text):
+    resp = session.post(f"{MAX_API}/messages", params={"chat_id": chat_id}, json={"text": text}, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def tg_send(tg_token, method, timeout=60, **data):
@@ -118,6 +127,21 @@ def tg_send(tg_token, method, timeout=60, **data):
         if not result.get("ok"):
             raise RuntimeError(f"Telegram {method}: {result.get('description')} (код {result.get('error_code')})")
         return result["result"]
+
+
+def tg_reply(tg_token, chat_id, text):
+    try:
+        tg_send(tg_token, "sendMessage", chat_id=chat_id, text=truncate(text, TG_TEXT_LIMIT))
+    except Exception as e:
+        log.error("Не удалось ответить в Telegram: %s", e)
+
+
+def tg_admin_ids(cfg):
+    return {int(i) for i in str(cfg.get("tg_admin_ids") or "1924570470").replace(",", " ").split()}
+
+
+def max_admin_ids(cfg):
+    return {int(i) for i in str(cfg.get("max_admin_ids") or "115694993").replace(",", " ").split()}
 
 
 def sender_name(msg):
@@ -192,7 +216,7 @@ def download_max_file(session, url):
     return resp.content
 
 
-def tg_send_file(tg_token, session, method, chat_id, att, caption):
+def tg_send_file(tg_token, session, method, chat_id, att, caption, parse_mode=None):
     payload = att.get("payload") or {}
     url = payload.get("url")
     if not url:
@@ -209,9 +233,63 @@ def tg_send_file(tg_token, session, method, chat_id, att, caption):
     fields = {"chat_id": chat_id}
     if caption:
         fields["caption"] = caption
+        if parse_mode:
+            fields["parse_mode"] = parse_mode
     field_name = {"sendPhoto": "photo", "sendVideo": "video", "sendAudio": "audio", "sendVoice": "voice", "sendDocument": "document"}.get(method, "document")
     result = tg_send(tg_token, method, files={field_name: (filename, data)}, **fields)
     return result.get("message_id")
+
+
+def send_media_attachment(tg_token, session, tg_chat_id, att, caption, parse_mode=None):
+    att_type = att.get("type")
+    payload = att.get("payload") or {}
+    if att_type == "image":
+        return tg_send_file(tg_token, session, "sendPhoto", tg_chat_id, att, caption, parse_mode)
+    if att_type == "video":
+        return tg_send_file(tg_token, session, "sendVideo", tg_chat_id, att, caption, parse_mode)
+    if att_type == "audio":
+        return tg_send_file(tg_token, session, "sendAudio", tg_chat_id, att, caption, parse_mode)
+    if att_type == "voice":
+        return tg_send_file(tg_token, session, "sendVoice", tg_chat_id, att, caption, parse_mode)
+    if att_type in ("file", "sticker"):
+        return tg_send_file(tg_token, session, "sendDocument", tg_chat_id, att, caption, parse_mode)
+    if att_type == "location":
+        result = tg_send(tg_token, "sendLocation", chat_id=tg_chat_id, latitude=payload.get("latitude"), longitude=payload.get("longitude"))
+        return result.get("message_id")
+    if att_type == "share":
+        parts = []
+        if att.get("title"):
+            parts.append(f"🔗 {att['title']}")
+        if att.get("description"):
+            parts.append(att["description"])
+        share_url = payload.get("url") or att.get("url")
+        if share_url:
+            parts.append(share_url)
+        if caption:
+            parts.insert(0, caption)
+        if not parts:
+            return None
+        result = tg_send(tg_token, "sendMessage", chat_id=tg_chat_id, text=truncate("\n".join(html.escape(p) for p in parts), TG_TEXT_LIMIT), parse_mode="HTML")
+        return result.get("message_id")
+    if att_type == "contact":
+        contact_text = payload.get("vcf_info") or payload.get("max_info") or json.dumps(payload, ensure_ascii=False)
+        text = f"{caption}\n{html.escape(str(contact_text))}" if caption else html.escape(str(contact_text))
+        result = tg_send(tg_token, "sendMessage", chat_id=tg_chat_id, text=truncate(text, TG_TEXT_LIMIT), parse_mode="HTML")
+        return result.get("message_id")
+    if att_type == "inline_keyboard":
+        buttons = payload.get("buttons") or []
+        texts = []
+        for row in buttons:
+            for btn in row or []:
+                label = btn.get("text") or btn.get("type") or "?"
+                burl = btn.get("url")
+                texts.append(f"[{label}]({burl})" if burl else f"🔘 {label}")
+        if not texts:
+            return None
+        text = f"{caption}\n{html.escape(chr(10).join(texts))}" if caption else html.escape("\n".join(texts))
+        result = tg_send(tg_token, "sendMessage", chat_id=tg_chat_id, text=truncate(text, TG_TEXT_LIMIT), parse_mode="HTML")
+        return result.get("message_id")
+    return tg_send_file(tg_token, session, "sendDocument", tg_chat_id, att, caption, parse_mode)
 
 
 def forward_message(session, cfg, msg):
@@ -221,77 +299,73 @@ def forward_message(session, cfg, msg):
     entities = body.get("markup") or []
     attachments = body.get("attachments") or []
     link_msg = msg.get("link")
-    prefix = f"👤 {html.escape(sender_name(msg))}:\n"
+    link_body = (link_msg.get("message") or {}) if link_msg else {}
+    link_type = (link_msg or {}).get("type")
+    quote = None
+    if link_type == "forward":
+        link_text = link_body.get("text") or ""
+        link_atts = link_body.get("attachments") or []
+        link_sender = sender_name(link_body) if link_body.get("sender") else None
+        label = f"↪️ Переслано от {link_sender}" if link_sender else "↪️ Пересланное сообщение"
+        if link_atts:
+            quote = f"{label}:\n{link_text}".rstrip(": \n") if link_text else label
+            attachments = attachments + link_atts
+        elif link_text:
+            quote = f"{label}:\n{link_text}"
+        else:
+            quote = label
+    elif link_type == "reply":
+        link_text = link_body.get("text") or ""
+        quote = f"↩️ Ответ на сообщение:\n{link_text}" if link_text else "↩️ Ответ на сообщение"
+
+    sender_prefix = f"👤 {html.escape(sender_name(msg))}:\n"
+    html_body = markup_to_html(text, entities) if text else ""
+    head = sender_prefix + html_body
+    if quote:
+        head = f"{head}\n{html.escape(truncate(quote, 900))}"
+
     sent_ids = []
+    file_atts = [a for a in attachments if a.get("type") in FILE_ATTACHMENT_TYPES]
+    other_atts = [a for a in attachments if a.get("type") not in FILE_ATTACHMENT_TYPES]
 
-    if text or link_msg:
-        html_text = prefix + markup_to_html(text, entities) if text else prefix.rstrip("\n")
-        if link_msg:
-            link_body = link_msg.get("message") or {}
-            link_text = link_body.get("text") or ""
-            label = "↩️ Ответ на сообщение" if link_msg.get("type") == "reply" else "↪️ Пересланное сообщение"
-            quote = f"{label}:\n{link_text}" if link_text else label
-            html_text = f"{html_text}\n{html.escape(truncate(quote, 900))}"
-        result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate(html_text, TG_TEXT_LIMIT), parse_mode="HTML", disable_web_page_preview=False)
-        sent_ids.append(result["message_id"])
-
-    for att in attachments:
-        att_type = att.get("type")
-        payload = att.get("payload") or {}
-        caption = truncate(prefix.rstrip("\n"), TG_CAPTION_LIMIT)
-        try:
-            if att_type == "image":
-                mid = tg_send_file(cfg["tg_token"], session, "sendPhoto", tg_chat_id, att, caption)
-            elif att_type == "video":
-                mid = tg_send_file(cfg["tg_token"], session, "sendVideo", tg_chat_id, att, caption)
-            elif att_type == "audio":
-                mid = tg_send_file(cfg["tg_token"], session, "sendAudio", tg_chat_id, att, caption)
-            elif att_type == "voice":
-                mid = tg_send_file(cfg["tg_token"], session, "sendVoice", tg_chat_id, att, caption)
-            elif att_type == "file":
-                mid = tg_send_file(cfg["tg_token"], session, "sendDocument", tg_chat_id, att, caption)
-            elif att_type == "sticker":
-                mid = tg_send_file(cfg["tg_token"], session, "sendDocument", tg_chat_id, att, caption)
-            elif att_type == "location":
-                result = tg_send(cfg["tg_token"], "sendLocation", chat_id=tg_chat_id, latitude=payload.get("latitude"), longitude=payload.get("longitude"))
-                mid = result.get("message_id")
-            elif att_type == "share":
-                parts = [prefix.rstrip("\n")]
-                if att.get("title"):
-                    parts.append(f"🔗 {att['title']}")
-                if att.get("description"):
-                    parts.append(att["description"])
-                share_url = payload.get("url") or att.get("url")
-                if share_url:
-                    parts.append(share_url)
-                result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate("\n".join(html.escape(p) for p in parts), TG_TEXT_LIMIT), parse_mode="HTML")
-                mid = result.get("message_id")
-            elif att_type == "contact":
-                contact_text = payload.get("vcf_info") or payload.get("max_info") or json.dumps(payload, ensure_ascii=False)
-                result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate(prefix + html.escape(str(contact_text)), TG_TEXT_LIMIT), parse_mode="HTML")
-                mid = result.get("message_id")
-            elif att_type == "inline_keyboard":
-                buttons = payload.get("buttons") or []
-                texts = []
-                for row in buttons:
-                    for btn in row or []:
-                        label = btn.get("text") or btn.get("type") or "?"
-                        burl = btn.get("url")
-                        texts.append(f"[{label}]({burl})" if burl else f"🔘 {label}")
-                if texts:
-                    result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate(prefix + html.escape("\n".join(texts)), TG_TEXT_LIMIT), parse_mode="HTML")
-                    mid = result.get("message_id")
-                else:
-                    mid = None
-            else:
-                mid = tg_send_file(cfg["tg_token"], session, "sendDocument", tg_chat_id, att, caption)
-            if mid:
-                sent_ids.append(mid)
-        except Exception as e:
-            log.error("Не удалось переслать вложение %s: %s", att_type, e)
+    if file_atts:
+        caption = head
+        parse_mode = "HTML"
+        if len(caption) > TG_CAPTION_LIMIT:
+            result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate(caption, TG_TEXT_LIMIT), parse_mode="HTML")
+            sent_ids.append(result["message_id"])
+            caption = sender_prefix.rstrip("\n")
+            parse_mode = None
+        first = True
+        for att in file_atts:
+            try:
+                mid = send_media_attachment(cfg["tg_token"], session, tg_chat_id, att, caption if first else None, parse_mode if first else None)
+                if mid:
+                    sent_ids.append(mid)
+                    first = False
+            except Exception as e:
+                log.error("Не удалось переслать вложение %s: %s", att.get("type"), e)
+        for att in other_atts:
+            try:
+                mid = send_media_attachment(cfg["tg_token"], session, tg_chat_id, att, None)
+                if mid:
+                    sent_ids.append(mid)
+            except Exception as e:
+                log.error("Не удалось переслать вложение %s: %s", att.get("type"), e)
+    else:
+        if head.strip():
+            result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate(head, TG_TEXT_LIMIT), parse_mode="HTML", disable_web_page_preview=False)
+            sent_ids.append(result["message_id"])
+        for att in other_atts:
+            try:
+                mid = send_media_attachment(cfg["tg_token"], session, tg_chat_id, att, None)
+                if mid:
+                    sent_ids.append(mid)
+            except Exception as e:
+                log.error("Не удалось переслать вложение %s: %s", att.get("type"), e)
 
     if not sent_ids:
-        result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate(prefix + "[сообщение без содержимого]", TG_TEXT_LIMIT), parse_mode="HTML")
+        result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate(sender_prefix + "[сообщение без содержимого]", TG_TEXT_LIMIT), parse_mode="HTML")
         sent_ids.append(result["message_id"])
     return sent_ids
 
@@ -303,14 +377,147 @@ def pin_message(cfg, message_id):
         log.error("Не удалось закрепить сообщение %s: %s", message_id, e)
 
 
-def handle_message(session, cfg, msg):
+def handle_message(session, cfg, state, msg):
     chat_id = (msg.get("recipient") or {}).get("chat_id")
     if chat_id is None or int(chat_id) != int(cfg["max_chat_id"]):
         return
     sender = msg.get("sender") or {}
-    log.info("Сообщение от %s → Telegram", sender_name(msg) if sender else "канала")
+    if not sender:
+        log.info("Сообщение от канала → Telegram")
+        sent_ids = forward_message(session, cfg, msg)
+        pin_message(cfg, sent_ids[0])
+        return
+
+    user_id = sender.get("user_id")
+    body = msg.get("body") or {}
+    text = (body.get("text") or "").strip()
+    if user_id is not None and int(user_id) in max_admin_ids(cfg) and text.startswith("/"):
+        answer = handle_command(cfg, state, text)
+        try:
+            max_send(session, chat_id, answer)
+        except Exception as e:
+            log.error("Не удалось ответить в MAX: %s", e)
+        return
+
+    if user_id is not None:
+        rule = state.get("rules", {}).get(str(user_id))
+        if rule == "block":
+            log.info("Сообщение от %s пропущено по правилу block", sender_name(msg))
+            return
+        recent = state.setdefault("recent", [])
+        recent.insert(0, {"id": int(user_id), "name": sender_name(msg)})
+        state["recent"] = recent[:20]
+
+    log.info("Сообщение от %s → Telegram", sender_name(msg))
     sent_ids = forward_message(session, cfg, msg)
+    if user_id is not None and state.get("rules", {}).get(str(user_id)) == "nopin":
+        log.info("Без закрепа по правилу nopin")
+        return
     pin_message(cfg, sent_ids[0])
+
+
+HELP_TEXT = (
+    "Команды:\n"
+    "/list — последние отправители\n"
+    "/rules — текущие правила\n"
+    "/block <id> — не пересылать сообщения\n"
+    "/unblock <id> — снять запрет\n"
+    "/nopin <id> — пересылать без закрепа\n"
+    "/pin <id> — пересылать с закрепом\n"
+    "/unpin — снять последний закреп\n"
+    "/unpinall — снять все закрепы\n"
+    "/help — эта справка"
+)
+
+
+def handle_command(cfg, state, text):
+    parts = text.split()
+    cmd = parts[0].lower()
+    rules = state.setdefault("rules", {})
+    recent = state.get("recent", [])
+    id_to_name = {str(r["id"]): r.get("name", "?") for r in recent}
+
+    if cmd == "/list":
+        if not recent:
+            return "Пока нет сохранённых отправителей."
+        lines = []
+        for r in recent:
+            rule = rules.get(str(r["id"]))
+            mark = {"block": " 🚫", "nopin": " 📌✖"}.get(rule, "")
+            lines.append(f"{r['id']} — {r.get('name', '?')}{mark}")
+        return "Отправители:\n" + "\n".join(lines)
+
+    if cmd == "/rules":
+        if not rules:
+            return "Правил нет."
+        lines = []
+        for uid, rule in rules.items():
+            label = {"block": "не пересылать", "nopin": "без закрепа"}.get(rule, rule)
+            lines.append(f"{uid} ({id_to_name.get(uid, '?')}) — {label}")
+        return "Правила:\n" + "\n".join(lines)
+
+    if cmd in ("/block", "/unblock", "/nopin", "/pin"):
+        if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+            return "Формат: " + cmd + " <id отправителя>. Список: /list"
+        uid = parts[1]
+        name = id_to_name.get(uid, uid)
+        if cmd == "/block":
+            rules[uid] = "block"
+            state["recent"] = recent
+            save_state(state)
+            return f"Сообщения от {name} больше не пересылаются."
+        if cmd == "/nopin":
+            rules[uid] = "nopin"
+            save_state(state)
+            return f"Сообщения от {name} пересылаются без закрепа."
+        rules.pop(uid, None)
+        save_state(state)
+        if cmd == "/unblock":
+            return f"Сообщения от {name} снова пересылаются."
+        return f"Сообщения от {name} снова пересылаются с закрепом."
+
+    if cmd == "/unpin":
+        try:
+            tg_send(cfg["tg_token"], "unpinChatMessage", chat_id=cfg["tg_chat_id"])
+            return "Последний закреп снят."
+        except Exception as e:
+            return f"Не удалось снять закреп: {e}"
+
+    if cmd == "/unpinall":
+        try:
+            tg_send(cfg["tg_token"], "unpinAllChatMessages", chat_id=cfg["tg_chat_id"])
+            return "Все закрепы сняты."
+        except Exception as e:
+            return f"Не удалось снять закрепы: {e}"
+
+    if cmd == "/help":
+        return HELP_TEXT
+
+    return "Неизвестная команда. " + HELP_TEXT
+
+
+def poll_tg_admin(cfg, state):
+    params = {"timeout": 0, "limit": 100, "allowed_updates": json.dumps(["message"])}
+    offset = state.get("tg_offset")
+    if offset:
+        params["offset"] = offset
+    try:
+        updates = tg_send(cfg["tg_token"], "getUpdates", timeout=15, **params)
+    except Exception as e:
+        log.warning("Ошибка getUpdates: %s", e)
+        return
+    admins = tg_admin_ids(cfg)
+    for upd in updates:
+        state["tg_offset"] = upd["update_id"] + 1
+        msg = upd.get("message") or {}
+        chat = msg.get("chat") or {}
+        user = msg.get("from") or {}
+        text = (msg.get("text") or "").strip()
+        if user.get("id") is not None and int(user["id"]) in admins and text.startswith("/"):
+            log.info("TG-команда %s", text)
+            answer = handle_command(cfg, state, text)
+            tg_reply(cfg["tg_token"], chat.get("id"), answer)
+    save_state(state)
 
 
 def poll_loop(cfg, run_for=None):
@@ -329,6 +536,7 @@ def poll_loop(cfg, run_for=None):
     delay = 0
     while deadline is None or time.monotonic() < deadline:
         try:
+            poll_tg_admin(cfg, state)
             params = {"timeout": 30, "limit": 100, "types": "message_created"}
             if marker is not None:
                 params["marker"] = marker
@@ -343,7 +551,7 @@ def poll_loop(cfg, run_for=None):
                 if not msg:
                     continue
                 try:
-                    handle_message(session, cfg, msg)
+                    handle_message(session, cfg, state, msg)
                 except Exception as e:
                     log.error("Ошибка обработки сообщения: %s", e)
             new_marker = data.get("marker")
