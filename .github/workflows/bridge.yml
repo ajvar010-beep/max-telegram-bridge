@@ -1,9 +1,11 @@
 name: Bridge
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
 
 concurrency:
   group: bridge
@@ -34,3 +36,12 @@ jobs:
             config.json
       - run: python setup_cert.py
       - run: python bridge.py --run-for 240
+      - name: Restart next run
+        if: always()
+        run: |
+          sleep 30
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/bridge.yml/dispatches" \
+            -d '{"ref":"main"}'
