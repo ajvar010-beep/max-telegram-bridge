@@ -209,7 +209,8 @@ def tg_send_file(tg_token, session, method, chat_id, att, caption):
     fields = {"chat_id": chat_id}
     if caption:
         fields["caption"] = caption
-    result = tg_send(tg_token, method, files={"file": (filename, data)}, **fields)
+    field_name = {"sendPhoto": "photo", "sendVideo": "video", "sendAudio": "audio", "sendDocument": "document"}.get(method, "document")
+    result = tg_send(tg_token, method, files={field_name: (filename, data)}, **fields)
     return result.get("message_id")
 
 
