@@ -196,7 +196,7 @@ def tg_send_file(tg_token, session, method, chat_id, att, caption):
     payload = att.get("payload") or {}
     url = payload.get("url")
     if not url:
-        log.warning("Вложение %s без payload.url — пропускаю", att.get("type"))
+        log.warning("Вложение %s без payload.url — пропускаю. Структура: %s", att.get("type"), json.dumps(att, ensure_ascii=False)[:500])
         return None
     data = download_max_file(session, url)
     filename = payload.get("filename") or att.get("filename")
@@ -204,12 +204,12 @@ def tg_send_file(tg_token, session, method, chat_id, att, caption):
         if att.get("type") == "sticker":
             filename = "sticker.webp"
         else:
-            ext = {"sendPhoto": ".jpg", "sendVideo": ".mp4", "sendAudio": ".mp3", "sendDocument": ".bin"}
+            ext = {"sendPhoto": ".jpg", "sendVideo": ".mp4", "sendAudio": ".mp3", "sendVoice": ".ogg", "sendDocument": ".bin"}
             filename = "file" + ext.get(method, ".bin")
     fields = {"chat_id": chat_id}
     if caption:
         fields["caption"] = caption
-    field_name = {"sendPhoto": "photo", "sendVideo": "video", "sendAudio": "audio", "sendDocument": "document"}.get(method, "document")
+    field_name = {"sendPhoto": "photo", "sendVideo": "video", "sendAudio": "audio", "sendVoice": "voice", "sendDocument": "document"}.get(method, "document")
     result = tg_send(tg_token, method, files={field_name: (filename, data)}, **fields)
     return result.get("message_id")
 
@@ -246,6 +246,8 @@ def forward_message(session, cfg, msg):
                 mid = tg_send_file(cfg["tg_token"], session, "sendVideo", tg_chat_id, att, caption)
             elif att_type == "audio":
                 mid = tg_send_file(cfg["tg_token"], session, "sendAudio", tg_chat_id, att, caption)
+            elif att_type == "voice":
+                mid = tg_send_file(cfg["tg_token"], session, "sendVoice", tg_chat_id, att, caption)
             elif att_type == "file":
                 mid = tg_send_file(cfg["tg_token"], session, "sendDocument", tg_chat_id, att, caption)
             elif att_type == "sticker":
