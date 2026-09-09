@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import time
+from urllib.parse import quote
 
 import requests
 
@@ -32,6 +33,8 @@ MAX_ENTITY_TO_HTML = {
 }
 
 FILE_ATTACHMENT_TYPES = {"image", "video", "audio", "voice", "file", "sticker"}
+
+MINI_APP_URL = os.environ.get("MINI_APP_URL") or "https://ajvar010-beep.github.io/max-telegram-bridge/"
 
 log = logging.getLogger("bridge")
 _last_tg_send = 0.0
@@ -435,6 +438,8 @@ HELP_TEXT = (
     "/chats — обслуживаемые чаты MAX\n"
     "/chat add <id> — добавить чат MAX\n"
     "/chat remove <id> — убрать чат MAX\n"
+    "/app — панель управления (кнопка под полем ввода)\n"
+    "/app hide — убрать кнопку панели\n"
     "/help — эта справка"
 )
 
@@ -527,10 +532,100 @@ def handle_command(cfg, state, text, chat_id=None):
         except Exception as e:
             return f"Не удалось снять закрепы: {e}"
 
+    if cmd == "/app":
+        return (
+            "Панель управления доступна в Telegram: напишите /app в TG-группе "
+            "или боту в личные сообщения — под полем ввода появится кнопка «🎛 Панель управления»."
+        )
+
     if cmd == "/help":
         return HELP_TEXT
 
     return "Неизвестная команда. " + HELP_TEXT
+
+
+def send_app_keyboard(cfg, state, chat_id, hide=False):
+    if hide:
+        markup = {"remove_keyboard": True}
+        try:
+            tg_send(cfg["tg_token"], "sendMessage", chat_id=chat_id,
+                    text="Кнопка панели скрыта. Чтобы вернуть — снова /app.",
+                    reply_markup=json.dumps(markup))
+        except Exception as e:
+            log.warning("Не удалось скрыть кнопку панели: %s", e)
+        return
+    snapshot = {
+        "recent": state.get("recent", []),
+        "rules": state.get("rules", {}),
+        "max_chat_ids": cfg["max_chat_ids"],
+    }
+    url = MINI_APP_URL + "?d=" + quote(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))) + "#" + str(int(time.time()))
+    markup = {
+        "keyboard": [[{"text": "🎛 Панель управления", "web_app": {"url": url}}]],
+        "resize_keyboard": True,
+    }
+    try:
+        tg_send(cfg["tg_token"], "sendMessage", chat_id=chat_id,
+                text="Панель управления мостом открыта — нажмите кнопку «🎛 Панель управления» под полем ввода.",
+                reply_markup=json.dumps(markup))
+    except Exception as e:
+        log.warning("Не удалось отправить клавиатуру панели: %s", e)
+
+
+def apply_web_app_data(cfg, state, raw):
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return "Не удалось разобрать данные панели."
+    if not isinstance(data, dict):
+        return "Не удалось разобрать данные панели."
+
+    unpin = data.get("unpin")
+    if unpin == "all":
+        try:
+            tg_send(cfg["tg_token"], "unpinAllChatMessages", chat_id=cfg["tg_chat_id"])
+            return "Все закрепы сняты."
+        except Exception as e:
+            return f"Не удалось снять закрепы: {e}"
+    if unpin == "last":
+        try:
+            tg_send(cfg["tg_token"], "unpinChatMessage", chat_id=cfg["tg_chat_id"])
+            return "Последний закреп снят."
+        except Exception as e:
+            return f"Не удалось снять закреп: {e}"
+
+    changed = []
+    rules = data.get("rules")
+    if isinstance(rules, dict):
+        clean = {}
+        for uid, rule in rules.items():
+            if not str(uid).lstrip("-").isdigit():
+                continue
+            if rule in ("block", "nopin"):
+                clean[str(uid)] = rule
+        state["rules"] = clean
+        changed.append(f"правила: {len(clean)}")
+    ids = data.get("max_chat_ids")
+    if isinstance(ids, list):
+        parsed = []
+        for x in ids:
+            try:
+                parsed.append(int(str(x).strip()))
+            except Exception:
+                continue
+        if parsed:
+            parsed = list(dict.fromkeys(parsed))
+            cfg["max_chat_ids"] = parsed
+            if cfg.get("max_chat_id") not in parsed:
+                cfg["max_chat_id"] = parsed[0]
+            state["max_chat_ids"] = parsed
+            changed.append(f"чаты MAX: {len(parsed)}")
+        elif cfg["max_chat_ids"]:
+            changed.append("список чатов MAX не изменён (пустой не принят)")
+    if not changed:
+        return "Панель не прислала изменений."
+    save_state(state)
+    return "Настройки из панели сохранены (" + ", ".join(changed) + ")."
 
 
 def poll_tg_admin(cfg, state):
@@ -550,10 +645,28 @@ def poll_tg_admin(cfg, state):
         chat = msg.get("chat") or {}
         user = msg.get("from") or {}
         text = (msg.get("text") or "").strip()
-        if user.get("id") is not None and int(user["id"]) in admins and text.startswith("/"):
-            log.info("TG-команда %s", text)
-            answer = handle_command(cfg, state, text)
+        if user.get("id") is None or int(user["id"]) not in admins:
+            continue
+        wad = msg.get("web_app_data")
+        if isinstance(wad, dict) and wad.get("data"):
+            log.info("Данные панели получены")
+            answer = apply_web_app_data(cfg, state, wad["data"])
             tg_reply(cfg["tg_token"], chat.get("id"), answer)
+            continue
+        if not text.startswith("/"):
+            continue
+        log.info("TG-команда %s", text)
+        parts = text.split()
+        if parts[0].lower() == "/app":
+            if chat.get("type") == "private":
+                send_app_keyboard(cfg, state, chat.get("id"), hide=len(parts) > 1 and parts[1].lower() == "hide")
+            else:
+                tg_reply(cfg["tg_token"], chat.get("id"),
+                         "Кнопку мини-приложений Telegram показывает только в личных чатах — "
+                         "напишите /app боту @zakreplatorinatorbot в личные сообщения.")
+            continue
+        answer = handle_command(cfg, state, text)
+        tg_reply(cfg["tg_token"], chat.get("id"), answer)
     save_state(state)
 
 

@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Панель управления мостом</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root {
+  --bg: var(--tg-theme-bg-color, #ffffff);
+  --text: var(--tg-theme-text-color, #000000);
+  --hint: var(--tg-theme-hint-color, #707579);
+  --accent: var(--tg-theme-button-color, #3390ec);
+  --section: var(--tg-theme-section-bg-color, #f1f1f1);
+  --header: var(--tg-theme-header-bg-color, #efeff3);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  padding: 12px 14px 90px;
+}
+h1 { font-size: 20px; margin-bottom: 4px; }
+.sub { color: var(--hint); font-size: 13px; margin-bottom: 16px; }
+section { margin-bottom: 18px; }
+h2 { font-size: 16px; margin-bottom: 8px; }
+.card {
+  background: var(--section);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.name { font-weight: 600; word-break: break-word; }
+.uid { color: var(--hint); font-size: 12px; word-break: break-all; }
+.empty { color: var(--hint); font-size: 13px; padding: 4px 2px; }
+.seg { display: flex; background: var(--bg); border-radius: 9px; padding: 2px; margin-top: 8px; }
+.seg button {
+  flex: 1; border: 0; background: transparent; color: var(--hint);
+  font-size: 13px; font-weight: 600; padding: 7px 4px; border-radius: 7px;
+  cursor: pointer; font-family: inherit;
+}
+.seg button.on { background: var(--accent); color: #fff; }
+.btn {
+  display: block; width: 100%; border: 0; border-radius: 12px;
+  background: var(--section); color: var(--text);
+  font-size: 15px; font-weight: 600; padding: 13px; margin-bottom: 8px;
+  cursor: pointer; font-family: inherit; text-align: center;
+}
+.btn:active { opacity: .7; }
+.btn.danger { color: #e53935; }
+.btns2 { display: flex; gap: 8px; }
+.btns2 .btn { flex: 1; }
+.addrow { display: flex; gap: 8px; }
+.addrow input {
+  flex: 1; min-width: 0; border: 0; border-radius: 12px; background: var(--section);
+  color: var(--text); font-size: 15px; padding: 12px; font-family: inherit; outline: none;
+}
+.addrow .btn { width: auto; margin: 0; padding: 12px 18px; }
+.fixed {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--section);
+}
+.save {
+  display: block; width: 100%; border: 0; border-radius: 12px;
+  background: var(--accent); color: var(--tg-theme-button-text-color, #fff);
+  font-size: 16px; font-weight: 700; padding: 15px; cursor: pointer; font-family: inherit;
+}
+.save:active { opacity: .8; }
+.status { text-align: center; color: var(--hint); font-size: 12px; margin-top: 6px; min-height: 16px; }
+</style>
+</head>
+<body>
+<h1>Панель управления</h1>
+<div class="sub" id="sub">Загрузка…</div>
+
+<section>
+  <h2>Отправители MAX</h2>
+  <div id="senders"></div>
+</section>
+
+<section>
+  <h2>Закрепы в Telegram</h2>
+  <div class="btns2">
+    <button class="btn danger" id="unpinLast">Снять последний</button>
+    <button class="btn danger" id="unpinAll">Снять все</button>
+  </div>
+  <div class="status" id="pinStatus"></div>
+</section>
+
+<section>
+  <h2>Чаты MAX</h2>
+  <div id="chats"></div>
+  <div class="addrow">
+    <input id="chatId" type="text" inputmode="numeric" placeholder="ID чата">
+    <button class="btn" id="addChat">Добавить</button>
+  </div>
+</section>
+
+<div class="fixed">
+  <button class="save" id="save">💾 Сохранить изменения</button>
+  <div class="status" id="saveStatus"></div>
+</div>
+
+<script>
+var tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+var MODES = [
+  { key: "", label: "✉️+📌" },
+  { key: "nopin", label: "✉️" },
+  { key: "block", label: "🚫" }
+];
+
+var data = { recent: [], rules: {}, max_chat_ids: [] };
+try {
+  var raw = new URLSearchParams(location.search).get("d");
+  if (raw) data = JSON.parse(decodeURIComponent(raw));
+} catch (e) {}
+
+document.getElementById("sub").textContent = data.max_chat_ids && data.max_chat_ids.length
+  ? "Подключено чатов MAX: " + data.max_chat_ids.length
+  : "Чаты MAX не подключены";
+
+function el(tag, cls, text) {
+  var n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function renderSenders() {
+  var box = document.getElementById("senders");
+  box.innerHTML = "";
+  var recent = data.recent || [];
+  if (!recent.length) {
+    box.appendChild(el("div", "empty", "Пока нет отправителей. Напишите что-нибудь в группу MAX — они появятся здесь."));
+    return;
+  }
+  var seen = {};
+  recent.forEach(function (s) {
+    var id = String(s.id);
+    if (seen[id]) return;
+    seen[id] = true;
+    var card = el("div", "card");
+    var row = el("div", "row");
+    var left = el("div");
+    left.appendChild(el("div", "name", s.name || "Без имени"));
+    left.appendChild(el("div", "uid", "ID: " + id));
+    row.appendChild(left);
+    card.appendChild(row);
+    var seg = el("div", "seg");
+    var cur = (data.rules || {})[id] || "";
+    MODES.forEach(function (m) {
+      var b = el("button", cur === m.key ? "on" : "", m.label);
+      b.onclick = function () {
+        if (m.key) data.rules[id] = m.key;
+        else delete data.rules[id];
+        renderSenders();
+      };
+      seg.appendChild(b);
+    });
+    card.appendChild(seg);
+    box.appendChild(card);
+  });
+}
+
+function renderChats() {
+  var box = document.getElementById("chats");
+  box.innerHTML = "";
+  var ids = data.max_chat_ids || [];
+  if (!ids.length) {
+    box.appendChild(el("div", "empty", "Список пуст"));
+    return;
+  }
+  ids.forEach(function (cid, i) {
+    var card = el("div", "card");
+    var row = el("div", "row");
+    row.appendChild(el("span", "uid", String(cid)));
+    var del = el("button", "btn danger", "Убрать");
+    del.style.width = "auto";
+    del.style.margin = "0";
+    del.style.padding = "8px 14px";
+    del.style.fontSize = "13px";
+    del.onclick = function () {
+      data.max_chat_ids.splice(i, 1);
+      renderChats();
+    };
+    row.appendChild(del);
+    card.appendChild(row);
+    box.appendChild(card);
+  });
+}
+
+document.getElementById("addChat").onclick = function () {
+  var inp = document.getElementById("chatId");
+  var v = inp.value.trim();
+  if (!/^-?\d+$/.test(v)) {
+    if (tg) tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error");
+    return;
+  }
+  v = String(parseInt(v, 10));
+  if (data.max_chat_ids.indexOf(v) === -1 && data.max_chat_ids.indexOf(Number(v)) === -1) {
+    data.max_chat_ids.push(v);
+  }
+  inp.value = "";
+  renderChats();
+};
+
+function unpin(kind, label) {
+  if (!tg) {
+    document.getElementById("pinStatus").textContent = "Доступно только внутри Telegram";
+    return;
+  }
+  tg.sendData(JSON.stringify({ unpin: kind }));
+  document.getElementById("pinStatus").textContent = label + " — отправлено боту";
+  if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+}
+
+document.getElementById("unpinLast").onclick = function () { unpin("last", "Снятие последнего закрепа"); };
+document.getElementById("unpinAll").onclick = function () { unpin("all", "Снятие всех закрепов"); };
+
+document.getElementById("save").onclick = function () {
+  if (!tg) {
+    document.getElementById("saveStatus").textContent = "Откройте панель из Telegram";
+    return;
+  }
+  var payload = JSON.stringify({ rules: data.rules, max_chat_ids: data.max_chat_ids.map(String) });
+  tg.sendData(payload);
+  document.getElementById("saveStatus").textContent = "Отправлено боту ✓";
+  if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+  setTimeout(function () { document.getElementById("saveStatus").textContent = ""; }, 3000);
+};
+
+renderSenders();
+renderChats();
+</script>
+</body>
+</html>
