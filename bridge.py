@@ -1143,7 +1143,8 @@ def run_init(cfg):
                         found = chat_id
                         break
         if found:
-            cfg["max_chat_id"] = found
+            cfg["max_chat_id"] = int(found)
+            cfg["max_chat_ids"] = [int(found)]
             print(f"max_chat_id найден: {found}")
         else:
             print("Не удалось найти chat_id MAX. Запустите --init ещё раз и добавьте бота в группу во время ожидания.")

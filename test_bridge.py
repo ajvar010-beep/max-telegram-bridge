@@ -55,6 +55,17 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(state["processed_max_updates"]), bridge.PROCESSED_UPDATES_LIMIT)
         self.assertEqual(state["processed_max_updates"][0], "5")
 
+    def test_init_persists_discovered_max_chat(self):
+        cfg = {"max_token": "max", "tg_token": "tg", "max_chat_ids": [], "max_chat_id": None, "tg_chat_id": 42}
+        state = {}
+        response = type("Response", (), {"raise_for_status": lambda self: None, "json": lambda self: {"updates": [{"update_type": "bot_added", "chat_id": 123}]}})()
+        session = type("Session", (), {"get": lambda self, *args, **kwargs: response})()
+        with patch.object(bridge, "load_state", return_value=state), patch.object(bridge, "save_state"), patch.object(bridge, "max_session", return_value=session), patch.object(bridge, "time") as clock:
+            clock.time.side_effect = [0, 0, 0]
+            bridge.run_init(cfg)
+        self.assertEqual(cfg["max_chat_ids"], [123])
+        self.assertEqual(state["max_chat_ids"], [123])
+
     def test_tokens_must_come_from_environment(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(bridge, "CONFIG_PATH", os.path.join(directory, "config.json")), patch.object(bridge, "STATE_PATH", os.path.join(directory, "state.json")), patch.dict(os.environ, {"MAX_TOKEN": "max", "TG_TOKEN": "tg"}, clear=True):
             Path(bridge.CONFIG_PATH).write_text(json.dumps({"max_token": "old", "tg_token": "old"}), encoding="utf-8")
