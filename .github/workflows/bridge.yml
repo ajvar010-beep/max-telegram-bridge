@@ -11,13 +11,6 @@ concurrency:
   group: bridge
   cancel-in-progress: false
 
-env:
-  MAX_TOKEN: ${{ secrets.MAX_TOKEN }}
-  TG_TOKEN: ${{ secrets.TG_TOKEN }}
-  MAX_CHAT_ID: ${{ secrets.MAX_CHAT_ID }}
-  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-  GH_PAT: ${{ secrets.GH_PAT }}
-
 jobs:
   bridge:
     runs-on: ubuntu-latest
@@ -30,19 +23,27 @@ jobs:
       - run: pip install requests certifi
       - uses: actions/cache@v4
         with:
-          key: bridge-state-${{ github.run_number }}
-          restore-keys: bridge-state-
-          path: |
-            state.json
-            config.json
+          key: max-tg-runtime-state-v2-${{ github.ref_name }}-${{ github.run_number }}
+          restore-keys: |
+            max-tg-runtime-state-v2-${{ github.ref_name }}-
+          path: state.json
       - run: python setup_cert.py
-      - run: python bridge.py --run-for 240
+      - name: Run bridge
+        env:
+          MAX_TOKEN: ${{ secrets.MAX_TOKEN }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: python bridge.py --run-for 240
       - name: Restart next run
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           sleep 30
-          curl -sf -X POST \
-            -H "Authorization: Bearer ${{ github.token }}" \
+          curl --fail-with-body --silent --show-error --request POST \
+            --retry 3 --retry-delay 5 --retry-connrefused \
+            --connect-timeout 10 --max-time 30 \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/bridge.yml/dispatches" \
-            -d '{"ref":"main"}'
+            --data '{"ref":"${{ github.ref_name }}"}'

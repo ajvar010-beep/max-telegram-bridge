@@ -4,9 +4,11 @@ import html
 import json
 import logging
 import os
+import re
 import sys
 import time
 import zlib
+from urllib.parse import urlsplit
 
 import requests
 
@@ -24,6 +26,8 @@ TG_API = "https://api.telegram.org"
 TG_TEXT_LIMIT = 4096
 TG_CAPTION_LIMIT = 1024
 SEND_INTERVAL = 0.55
+PROCESSED_UPDATES_LIMIT = 1000
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^\s()]+)\)")
 
 MAX_ENTITY_TO_HTML = {
     "strong": "b",
@@ -62,23 +66,35 @@ def load_config():
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-    env_keys = {"max_token": "MAX_TOKEN", "tg_token": "TG_TOKEN", "max_chat_id": "MAX_CHAT_ID", "tg_chat_id": "TG_CHAT_ID"}
-    for key, env in env_keys.items():
-        val = os.environ.get(env)
-        if val:
-            cfg[key] = val if key == "max_chat_id" else (int(val) if key.endswith("chat_id") else val)
+    cfg.pop("max_token", None)
+    cfg.pop("tg_token", None)
+    cfg["max_token"] = os.environ.get("MAX_TOKEN", "")
+    cfg["tg_token"] = os.environ.get("TG_TOKEN", "")
+    if os.path.exists(STATE_PATH):
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                runtime = json.load(f)
+            if not cfg.get("max_chat_id") and runtime.get("max_chat_ids"):
+                cfg["max_chat_id"] = ",".join(str(chat_id) for chat_id in runtime["max_chat_ids"])
+            if not cfg.get("tg_chat_id") and runtime.get("tg_chat_id") is not None:
+                cfg["tg_chat_id"] = int(runtime["tg_chat_id"])
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
     ids = [int(x) for x in str(cfg.get("max_chat_id") or "").replace(";", ",").split(",") if x.strip()]
     cfg["max_chat_ids"] = ids
     if ids:
         cfg["max_chat_id"] = ids[0]
-    missing = [k for k in ("max_token", "tg_token") if not cfg.get(k)]
+    missing = [name for name in ("MAX_TOKEN", "TG_TOKEN") if not os.environ.get(name)]
     if missing:
-        sys.exit(f"Не заданы {', '.join(missing)}: заполните config.json или переменные окружения MAX_TOKEN/TG_TOKEN")
+        sys.exit(f"Не заданы {', '.join(missing)}: добавьте их в переменные окружения.")
     return cfg
 
 
 def load_state():
-    state = {"marker": None, "rules": {}, "tg_offset": None, "recent": [], "feed": [], "participants": {}, "tg_welcomed": []}
+    state = {
+        "marker": None, "rules": {}, "tg_offset": None, "recent": [], "feed": [],
+        "participants": {}, "tg_welcomed": [], "processed_max_updates": [],
+    }
     if os.path.exists(STATE_PATH):
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
@@ -213,11 +229,32 @@ def sender_name(msg):
     return name
 
 
+def markdown_links_to_html(text):
+    parts = re.split(r"(`[^`]*`)", text)
+    for index, part in enumerate(parts):
+        if index % 2:
+            parts[index] = html.escape(part)
+            continue
+        out = []
+        pos = 0
+        for match in MARKDOWN_LINK_RE.finditer(part):
+            out.append(html.escape(part[pos:match.start()]))
+            label, url = match.groups()
+            parsed = urlsplit(url)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                out.append(f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>')
+            else:
+                out.append(html.escape(match.group(0)))
+            pos = match.end()
+        out.append(html.escape(part[pos:]))
+        parts[index] = "".join(out)
+    return "".join(parts)
+
+
 def markup_to_html(text, entities):
     try:
-        escaped = html.escape(text)
         if not entities:
-            return escaped
+            return markdown_links_to_html(text)
         points = []
         for ent in entities:
             start = int(ent.get("offset", ent.get("from", 0)))
@@ -269,10 +306,7 @@ def truncate(text, limit):
 
 
 def download_max_file(session, url):
-    try:
-        resp = session.get(url, timeout=120)
-    except requests.exceptions.SSLError:
-        resp = requests.get(url, timeout=120, verify=False)
+    resp = session.get(url, timeout=120)
     resp.raise_for_status()
     return resp.content
 
@@ -342,12 +376,18 @@ def send_media_attachment(tg_token, session, tg_chat_id, att, caption, parse_mod
         texts = []
         for row in buttons:
             for btn in row or []:
-                label = btn.get("text") or btn.get("type") or "?"
-                burl = btn.get("url")
-                texts.append(f"[{label}]({burl})" if burl else f"🔘 {label}")
+                label = str(btn.get("text") or btn.get("type") or "?")
+                burl = str(btn.get("url") or "")
+                parsed = urlsplit(burl)
+                if parsed.scheme in {"http", "https"} and parsed.netloc:
+                    texts.append(f'<a href="{html.escape(burl, quote=True)}">{html.escape(label)}</a>')
+                else:
+                    texts.append(f"🔘 {html.escape(label)}")
         if not texts:
             return None
-        text = f"{caption}\n{html.escape(chr(10).join(texts))}" if caption else html.escape("\n".join(texts))
+        text = "\n".join(texts)
+        if caption:
+            text = f"{caption}\n{text}"
         result = tg_send(tg_token, "sendMessage", chat_id=tg_chat_id, text=truncate(text, TG_TEXT_LIMIT), parse_mode="HTML")
         return result.get("message_id")
     return tg_send_file(tg_token, session, "sendDocument", tg_chat_id, att, caption, parse_mode)
@@ -875,11 +915,17 @@ def apply_secretary_data(session, cfg, state, raw, tg_chat_id, user_name):
         if quote_text:
             body_text += f"\n↩️ «{truncate(quote_text, 300)}» ({target.get('name', '?')})"
         link = {"message_id": int(target["id"]), "chat_id": int(target["chat_id"])}
+        sent = 0
         for mcid in cfg["max_chat_ids"]:
             try:
                 max_send(session, mcid, body_text, link=link)
+                sent += 1
             except Exception as e:
                 log.warning("Реакция в MAX-чат %s не ушла: %s", mcid, e)
+        if not sent:
+            return "Не удалось отправить реакцию в MAX. Попробуйте позже."
+        if sent < len(cfg["max_chat_ids"]):
+            return f"{emoji} Реакция отправлена в {sent} из {len(cfg['max_chat_ids'])} чатов MAX."
         return f"{emoji} Реакция отправлена в MAX."
     text = str(data.get("send") or "").strip()
     if text:
@@ -926,7 +972,6 @@ def poll_tg_admin(session, cfg, state):
                 state["tg_welcomed"] = welcomed[-300:]
                 state_changed = True
                 send_secretary_keyboard(cfg, state, chat.get("id"), user_name)
-                continue
             wad = msg.get("web_app_data")
             if isinstance(wad, dict) and wad.get("data"):
                 log.info("Данные секретаря от %s", user_name)
@@ -985,6 +1030,24 @@ def poll_tg_admin(session, cfg, state):
     save_state(state)
 
 
+def update_key(upd):
+    msg = upd.get("message") or {}
+    chat_id = (msg.get("recipient") or {}).get("chat_id") or upd.get("chat_id")
+    message_id = msg.get("mid") or msg.get("message_id") or msg.get("id") or upd.get("id")
+    if chat_id is None or message_id is None:
+        return None
+    return f"{chat_id}:{message_id}"
+
+
+def remember_processed_update(state, key):
+    if not key:
+        return
+    processed = state.setdefault("processed_max_updates", [])
+    if key not in processed:
+        processed.append(key)
+    state["processed_max_updates"] = processed[-PROCESSED_UPDATES_LIMIT:]
+
+
 def poll_loop(cfg, run_for=None):
     session = max_session(cfg["max_token"])
     deadline = time.monotonic() + run_for if run_for else None
@@ -1022,14 +1085,24 @@ def poll_loop(cfg, run_for=None):
             resp.raise_for_status()
             data = resp.json()
             updates = data.get("updates") or []
+            processed = set(state.get("processed_max_updates") or [])
+            batch_failed = False
             for upd in updates:
                 msg = upd.get("message")
-                if not msg:
+                key = update_key(upd)
+                if not msg or key in processed:
                     continue
                 try:
                     handle_message(session, cfg, state, msg)
                 except Exception as e:
                     log.error("Ошибка обработки сообщения: %s", e)
+                    batch_failed = True
+                    break
+                remember_processed_update(state, key)
+                processed.add(key)
+                save_state(state)
+            if batch_failed:
+                raise RuntimeError("MAX batch обработан не полностью; marker не обновлён")
             new_marker = data.get("marker")
             if new_marker is not None:
                 marker = new_marker
@@ -1106,9 +1179,13 @@ def run_init(cfg):
     else:
         print(f"tg_chat_id уже задан: {cfg['tg_chat_id']}")
 
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    print(f"\nКонфигурация сохранена в {CONFIG_PATH}")
+    state = load_state()
+    if cfg.get("max_chat_ids"):
+        state["max_chat_ids"] = cfg["max_chat_ids"]
+    if cfg.get("tg_chat_id"):
+        state["tg_chat_id"] = cfg["tg_chat_id"]
+    save_state(state)
+    print(f"\nНастройки чатов сохранены в {STATE_PATH}")
     if cfg.get("max_chat_id") and cfg.get("tg_chat_id"):
         print("Всё готово. Запустите: python bridge.py")
 
