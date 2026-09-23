@@ -11,8 +11,8 @@ if not sys.stdout.isatty():
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CA_BUNDLE = os.path.join(BASE_DIR, "ca_bundle.pem")
 LOCAL_CERTS = {
-    "root_ca.pem": "936a43fea6e8e525bcc0f81acd9c3d21b4fc4b9b68acea7906d698005afc6504",
-    "sub_ca.pem": "f0ae589f36774f29ef3648f7984b08d42fcce6f1ffeeb6236d773daeb2744ea6",
+    "root_ca.pem": "0819977502d9aed2234830f6ffb91f82f401d3674c6e51dd19e16d8b3dbf0eb4",
+    "sub_ca.pem": "a97bea1a5b8f4fc386016b3e13d9eb63544cf4fd82985ad80741bdb5a08cb5c5",
 }
 TEST_URL = "https://platform-api2.max.ru/me"
 
