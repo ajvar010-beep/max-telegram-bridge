@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: bridge
@@ -20,9 +21,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests certifi
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
-          key: max-tg-runtime-state-v2-${{ github.ref_name }}-init-${{ github.run_id }}
+          key: max-tg-init-state-v2-${{ github.ref_name }}-${{ github.run_number }}
+          restore-keys: |
+            max-tg-runtime-state-v2-${{ github.ref_name }}-
           path: state.json
       - run: python setup_cert.py
       - name: Discover chats
@@ -30,3 +33,21 @@ jobs:
           MAX_TOKEN: ${{ secrets.MAX_TOKEN }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
         run: python bridge.py --init
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          key: max-tg-runtime-state-v2-${{ github.ref_name }}-${{ github.run_number }}
+          path: state.json
+      - name: Start bridge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 10
+          curl --fail-with-body --silent --show-error --request POST \
+            --retry 3 --retry-delay 5 --retry-connrefused \
+            --connect-timeout 10 --max-time 30 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/bridge.yml/dispatches" \
+            --data '{"ref":"${{ github.ref_name }}"}'

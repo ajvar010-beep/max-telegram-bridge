@@ -73,6 +73,41 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(cfg["max_token"], "max")
         self.assertEqual(cfg["tg_token"], "tg")
 
+    def test_truncate_respects_utf16_limits(self):
+        emoji = "😀" * 3000
+        truncated = bridge.truncate(emoji, bridge.TG_TEXT_LIMIT)
+        self.assertLessEqual(bridge.utf16_len(truncated), bridge.TG_TEXT_LIMIT)
+        self.assertEqual(bridge.truncate("привет", 4096), "привет")
+        self.assertTrue(bridge.truncate("a" * 5000, 4096).endswith("…"))
+
+    def test_failed_update_counter_increments(self):
+        state = {"processed_max_updates": [], "failed_max_updates": {}}
+        self.assertEqual(bridge.count_failed_update(state, "123:456"), 1)
+        self.assertEqual(bridge.count_failed_update(state, "123:456"), 2)
+        self.assertEqual(bridge.count_failed_update(state, "123:456"), 3)
+
+    def test_poisonous_update_is_skipped_after_max_attempts(self):
+        cfg = {"tg_token": "t", "tg_chat_id": 10}
+        state = {"marker": 5, "processed_max_updates": [], "failed_max_updates": {}, "rules": {}, "recent": [], "feed": []}
+        key = "1:456"
+        alerts = []
+        processed = set(state["processed_max_updates"])
+
+        def handle_fail(*args, **kwargs):
+            raise RuntimeError("poison")
+
+        for attempt in range(bridge.MAX_SEND_ATTEMPTS):
+            failed = bridge.count_failed_update(state, key)
+            self.assertEqual(failed, attempt + 1)
+            if failed < bridge.MAX_SEND_ATTEMPTS:
+                self.assertIn(key, state["failed_max_updates"])
+        with patch.object(bridge, "tg_send", side_effect=lambda *a, **k: alerts.append(k) or {}):
+            failed = bridge.count_failed_update(state, key)
+            self.assertGreaterEqual(failed, bridge.MAX_SEND_ATTEMPTS)
+            remember = bridge.remember_processed_update(state, key)
+            processed.add(key)
+        self.assertIn(key, state["processed_max_updates"])
+
 
 if __name__ == "__main__":
     unittest.main()

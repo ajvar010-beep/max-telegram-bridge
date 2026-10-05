@@ -25,6 +25,7 @@ MAX_API = "https://platform-api2.max.ru"
 TG_API = "https://api.telegram.org"
 TG_TEXT_LIMIT = 4096
 TG_CAPTION_LIMIT = 1024
+MAX_SEND_ATTEMPTS = 3
 SEND_INTERVAL = 0.55
 PROCESSED_UPDATES_LIMIT = 1000
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^\s()]+)\)")
@@ -94,6 +95,7 @@ def load_state():
     state = {
         "marker": None, "rules": {}, "tg_offset": None, "recent": [], "feed": [],
         "participants": {}, "tg_welcomed": [], "processed_max_updates": [],
+        "failed_max_updates": {},
     }
     if os.path.exists(STATE_PATH):
         try:
@@ -299,10 +301,17 @@ def markup_to_html(text, entities):
         return html.escape(text)
 
 
+def utf16_len(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
 def truncate(text, limit):
-    if len(text) <= limit:
+    if utf16_len(text) <= limit:
         return text
-    return text[: limit - 1] + "…"
+    cut = limit - 1
+    while cut > 0 and utf16_len(text[:cut]) > limit - 1:
+        cut -= 1
+    return text[:cut] + "…"
 
 
 def download_max_file(session, url):
@@ -432,7 +441,7 @@ def forward_message(session, cfg, msg):
     if file_atts:
         caption = head
         parse_mode = "HTML"
-        if len(caption) > TG_CAPTION_LIMIT:
+        if utf16_len(caption) > TG_CAPTION_LIMIT:
             result = tg_send(cfg["tg_token"], "sendMessage", chat_id=tg_chat_id, text=truncate(caption, TG_TEXT_LIMIT), parse_mode="HTML")
             sent_ids.append(result["message_id"])
             caption = sender_prefix.rstrip("\n")
@@ -843,7 +852,8 @@ def relay_tg_to_max(session, cfg, state, msg):
             resp.raise_for_status()
             blob = resp.content
         except Exception as e:
-            tg_reply(cfg["tg_token"], chat_id, f"Не удалось скачать файл из Telegram: {e}")
+            log.error("Ошибка скачивания файла из Telegram: %s", e)
+            tg_reply(cfg["tg_token"], chat_id, "Не удалось скачать файл из Telegram — попробуйте ещё раз.")
             return
         max_type, fallback_ext, mime = TG_ATT_TO_MAX.get(att, ("file", ".bin", "application/octet-stream"))
         fname = item.get("file_name") or os.path.basename(info.get("file_path") or "") or "file" + (fallback_ext or "")
@@ -1048,6 +1058,14 @@ def remember_processed_update(state, key):
     state["processed_max_updates"] = processed[-PROCESSED_UPDATES_LIMIT:]
 
 
+def count_failed_update(state, key):
+    attempts = state.setdefault("failed_max_updates", {})
+    attempts[key] = int(attempts.get(key) or 0) + 1
+    if len(attempts) > 2000:
+        state["failed_max_updates"] = dict(list(attempts.items())[-2000:])
+    return attempts[key]
+
+
 def poll_loop(cfg, run_for=None):
     session = max_session(cfg["max_token"])
     deadline = time.monotonic() + run_for if run_for else None
@@ -1096,8 +1114,23 @@ def poll_loop(cfg, run_for=None):
                     handle_message(session, cfg, state, msg)
                 except Exception as e:
                     log.error("Ошибка обработки сообщения: %s", e)
-                    batch_failed = True
-                    break
+                    failed = count_failed_update(state, key)
+                    if failed >= MAX_SEND_ATTEMPTS:
+                        log.error("Сообщение %s не удалось переслать %s раз(а) — пропускаю", key, failed)
+                        remember_processed_update(state, key)
+                        processed.add(key)
+                        state["failed_max_updates"].pop(key, None)
+                        try:
+                            tg_send(cfg["tg_token"], "sendMessage", chat_id=cfg["tg_chat_id"],
+                                    text=f"⚠️ Не удалось переслать сообщение {key} из MAX — оно пропущено, чтобы не остановить мост.")
+                        except Exception as alert_err:
+                            log.error("Не удалось отправить предупреждение: %s", alert_err)
+                    else:
+                        batch_failed = True
+                    save_state(state)
+                    if batch_failed:
+                        break
+                    continue
                 remember_processed_update(state, key)
                 processed.add(key)
                 save_state(state)
